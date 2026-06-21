@@ -3,6 +3,8 @@ import { Icons } from './Icons.jsx';
 import { DatePicker } from './DatePicker.jsx';
 import { useData } from './useData.js';
 import { startDonationCheckout } from './stripe.js';
+import { supabase } from './supabaseClient.js';
+import { Login } from './Login.jsx';
 import { ORG, SUPPORT_CATEGORIES, EXPENSE_CATEGORIES, PRIORITY_LEVELS } from './config.js';
 
 const C = ORG.currencySymbol;
@@ -15,9 +17,31 @@ const PLEDGE_METHODS = [
 ];
 const methodLabel = (m) => PLEDGE_METHODS.find(x => x.value === m)?.label || 'העברה בנקאית';
 
+// שער הכניסה — בודק אם המשתמש מחובר; אם לא, מציג מסך כניסה
 export default function App() {
+  const [session, setSession] = useState(undefined); // undefined = בטעינה
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50" dir="rtl">
+        <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+  if (!session) return <Login />;
+  return <MainApp />;
+}
+
+function MainApp() {
   const [currentRole, setCurrentRole] = useState('Admin'); // Admin, Staff, Fundraiser, Committee
   const [currentTab, setCurrentTab] = useState('dashboard');
+  const [userEmail, setUserEmail] = useState('');
+  const handleLogout = () => supabase.auth.signOut();
 
   // מאגרי נתונים — מחוברים ל-Supabase (בסיס נתונים אמיתי)
   const data = useData();
@@ -71,6 +95,10 @@ export default function App() {
       window.history.replaceState({}, '', window.location.pathname);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setUserEmail(data.user?.email || ''));
   }, []);
 
   // הרשאת גישה זמנית לחבר ועד
@@ -487,8 +515,13 @@ export default function App() {
             })}
           </nav>
 
-          <div className="p-4 bg-slate-950 border-t border-slate-800 text-center">
-            <span className="text-xs text-slate-500">{ORG.name} • גרסה v{ORG.version}</span>
+          <div className="p-4 bg-slate-950 border-t border-slate-800 text-center space-y-2">
+            {userEmail && <p className="text-[11px] text-slate-400 truncate" dir="ltr">{userEmail}</p>}
+            <button onClick={handleLogout} className="w-full text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg py-2 font-semibold transition flex items-center justify-center gap-2">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+              התנתק
+            </button>
+            <span className="block text-xs text-slate-500">{ORG.name} • גרסה v{ORG.version}</span>
           </div>
         </aside>
 

@@ -5,6 +5,10 @@
 [build.environment]
   NODE_VERSION = "20"
 
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
 # הפניית כל הנתיבים ל-index.html (אפליקציית עמוד יחיד)
 [[redirects]]
   from = "/*"

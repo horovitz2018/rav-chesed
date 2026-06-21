@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Icons } from './Icons.jsx';
 import { DatePicker } from './DatePicker.jsx';
 import { useData } from './useData.js';
+import { startDonationCheckout } from './stripe.js';
 import { ORG, SUPPORT_CATEGORIES, EXPENSE_CATEGORIES, PRIORITY_LEVELS } from './config.js';
 
 const C = ORG.currencySymbol;
@@ -43,6 +44,7 @@ export default function App() {
   const [showAddPledgeModal, setShowAddPledgeModal] = useState(false);
   const [payingPledge, setPayingPledge] = useState(null);     // התחייבות שרושמים לה תשלום
   const [historyPledge, setHistoryPledge] = useState(null);   // התחייבות שמציגים את היסטוריית התשלומים שלה
+  const [showOnlineDonationModal, setShowOnlineDonationModal] = useState(false);
 
   // חיפוש ובחירת תורם בהזנת תרומה
   const [selectedDonorId, setSelectedDonorId] = useState('');
@@ -55,6 +57,21 @@ export default function App() {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
   };
+
+  // טיפול בחזרה מ-Stripe (אחרי תשלום)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const d = params.get('donation');
+    if (d === 'success') {
+      showToast('התרומה התקבלה בהצלחה דרך Stripe! מעדכן נתונים...');
+      setTimeout(() => data.reload(), 2000);
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (d === 'cancel') {
+      showToast('התשלום בוטל.', 'error');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // הרשאת גישה זמנית לחבר ועד
   const [committeeApprovedAccess, setCommitteeApprovedAccess] = useState(false);
@@ -240,6 +257,9 @@ export default function App() {
 
   const handleMarkAsPaid = (reqId) =>
     run(() => data.markAsPaid(reqId), () => showToast('התמיכה שולמה בהצלחה והועברה לנתמך!'));
+
+  const handleOnlineDonation = (payload) =>
+    run(() => startDonationCheckout(payload)); // מפנה ל-Stripe; אם נכשל — מציג שגיאה
 
   const handleAddPledge = (pledgeData) =>
     run(() => data.addPledge(pledgeData), () => {
@@ -931,9 +951,14 @@ export default function App() {
                   <h2 className="text-2xl font-black text-slate-900">מעקב תרומות בזמן אמת</h2>
                   <p className="text-slate-500">תרומות דרך Stripe, יבוא בנק או הזנה ידנית</p>
                 </div>
-                <button onClick={() => setShowAddDonationModal(true)} className="flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold transition shadow-sm">
-                  <Icons.Plus /> הזנת תרומה
-                </button>
+                <div className="flex space-x-3 space-x-reverse">
+                  <button onClick={() => setShowOnlineDonationModal(true)} className="flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold transition shadow-sm">
+                    💳 תרומה אונליין (Stripe)
+                  </button>
+                  <button onClick={() => setShowAddDonationModal(true)} className="flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold transition shadow-sm">
+                    <Icons.Plus /> הזנת תרומה
+                  </button>
+                </div>
               </div>
 
               <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
@@ -1665,6 +1690,41 @@ export default function App() {
             </Field>
             <Field label="הערות (אופציונלי)"><input name="notes" type="text" className="modal-input" placeholder="לדוגמה: דרך כרטיס אשראי בסטרייפ" /></Field>
             <ModalButtons onCancel={() => setShowAddPledgeModal(false)} submitLabel="שמור התחייבות" submitClass="bg-indigo-600 hover:bg-indigo-700" />
+          </form>
+        </Modal>
+      )}
+
+      {/* Online Donation (Stripe Checkout) */}
+      {showOnlineDonationModal && (
+        <Modal onClose={() => setShowOnlineDonationModal(false)} title="תרומה אונליין דרך Stripe">
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            const donorId = fd.get('donorId');
+            const donor = donors.find(d => d.id === donorId);
+            handleOnlineDonation({
+              amount: Number(fd.get('amount')),
+              campaignId: fd.get('campaignId'),
+              donorId: donorId || '',
+              donorName: donor?.name || '',
+              email: fd.get('email') || donor?.email || '',
+            });
+          }} className="space-y-3 text-sm">
+            <div className="bg-indigo-50 border border-indigo-100 p-3 rounded-xl text-xs text-indigo-800">
+              לאחר אישור — תועבר לעמוד תשלום מאובטח של Stripe. התרומה תיקלט אוטומטית במערכת בסיום.
+            </div>
+            <Field label="תורם (אופציונלי — לשיוך התרומה)">
+              <select name="donorId" className="modal-input">
+                <option value="">תרומה אנונימית / ללא שיוך</option>
+                {donors.map(d => (<option key={d.id} value={d.id}>{d.name}</option>))}
+              </select>
+            </Field>
+            <Field label="אימייל לקבלה (אופציונלי)"><input name="email" type="email" className="modal-input" placeholder="donor@example.com" /></Field>
+            <Field label={`סכום התרומה (${C})`}><input required name="amount" type="number" min="1" className="modal-input" placeholder="לדוגמה: 100" /></Field>
+            <Field label="שיוך למגבית">
+              <select name="campaignId" className="modal-input">{campaigns.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}</select>
+            </Field>
+            <ModalButtons onCancel={() => setShowOnlineDonationModal(false)} submitLabel="המשך לתשלום ב-Stripe ←" submitClass="bg-indigo-600 hover:bg-indigo-700" />
           </form>
         </Modal>
       )}

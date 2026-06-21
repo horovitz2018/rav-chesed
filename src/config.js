@@ -11,6 +11,11 @@ export const ORG = {
   version: '1.0.0',
 };
 
+// ─── הגדרות התחברות ───
+// חשבון הכניסה הקבוע. הקוד שתגדיר הוא הסיסמה של חשבון זה ב-Supabase.
+// (המשתמש לא מקליד את האימייל — הוא מוגדר כאן מאחורי הקלעים.)
+export const AUTH_EMAIL = 'admin@ravchesed.app';
+
 // ─── הגדרות Stripe ───
 // כדי לאפשר תרומות אונליין: צור "Payment Link" בלוח הבקרה של Stripe
 // (https://dashboard.stripe.com/payment-links) והדבק כאן את הכתובת.

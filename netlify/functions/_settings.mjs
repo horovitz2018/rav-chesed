@@ -13,15 +13,21 @@ export const supabase = createClient(
   },
 );
 
-// שליפת הגדרות הארגון (שורה יחידה כרגע)
+// שליפת הגדרות הארגון (לא-סודי)
 export async function getSettings() {
   const { data } = await supabase.from('app_settings').select('*').limit(1).maybeSingle();
   return data || {};
 }
 
-// מחזיר מופע Stripe לפי המפתח השמור ב-DB (או null אם לא הוגדר)
+// שליפת המפתחות הסודיים — נגיש רק לשרת (service_role עוקף RLS)
+export async function getSecrets() {
+  const { data } = await supabase.from('app_secrets').select('*').limit(1).maybeSingle();
+  return data || {};
+}
+
+// מחזיר מופע Stripe לפי המפתח הסודי השמור (או null אם לא הוגדר)
 export async function getStripe() {
-  const settings = await getSettings();
-  const key = settings.stripe_secret_key;
-  return { stripe: key ? new Stripe(key) : null, settings };
+  const secrets = await getSecrets();
+  const key = secrets.stripe_secret_key;
+  return { stripe: key ? new Stripe(key) : null, secrets };
 }

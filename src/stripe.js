@@ -1,3 +1,21 @@
+import { supabase } from './supabaseClient.js';
+
+// שמירת מפתחות Stripe דרך פונקציית שרת מאומתת (הדפדפן לעולם לא קורא אותם בחזרה)
+export async function saveStripeKeys(payload) {
+  const { data: { session } } = await supabase.auth.getSession();
+  const res = await fetch('/.netlify/functions/save-stripe-keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let msg = 'שמירת המפתחות נכשלה';
+    try { msg = (await res.json()).error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
 // קריאה לפונקציית ה-serverless שיוצרת Checkout, והפניית הדפדפן לתשלום ב-Stripe.
 export async function startDonationCheckout(payload) {
   const res = await fetch('/.netlify/functions/create-donation-checkout', {

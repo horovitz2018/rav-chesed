@@ -51,6 +51,11 @@ export async function updateRow(table, id, patch) {
   return rowToApp(data);
 }
 
+export async function deleteRow(table, id) {
+  const { error } = await supabase.from(table).delete().eq('id', id);
+  if (error) throw error;
+}
+
 export async function deleteAllRows(table) {
   const { error } = await supabase.from(table).delete().neq('id', '00000000-0000-0000-0000-000000000000');
   if (error) throw error;

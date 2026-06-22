@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { fetchTable, insertRow, insertRows, updateRow, deleteAllRows, TABLES } from './db.js';
+import { fetchTable, insertRow, insertRows, updateRow, deleteRow, deleteAllRows, TABLES } from './db.js';
 
 // Hook מרכזי: טוען את כל הנתונים מ-Supabase ומספק פעולות כתיבה.
 // כל פעולה כותבת ל-DB ואז מעדכנת את ה-state המקומי כדי שהממשק יגיב מיד.
@@ -210,6 +210,29 @@ export function useData() {
     });
   };
 
+  // מחיקת/ניתוק תרומה — מסיר את הרשומה ומעדכן בחזרה את התורם והמגבית
+  const deleteDonation = async (donation) => {
+    await deleteRow('donations', donation.id);
+    setDonations((prev) => prev.filter((d) => d.id !== donation.id));
+    const donor = donors.find((d) => d.id === donation.donorId);
+    if (donor) {
+      const updated = await updateRow('donors', donor.id, { totalDonated: Math.max(0, donor.totalDonated - donation.amount) });
+      setDonors((prev) => prev.map((d) => (d.id === donor.id ? updated : d)));
+    }
+    const camp = campaigns.find((c) => c.id === donation.campaignId);
+    if (camp) {
+      const updated = await updateRow('campaigns', camp.id, { raised: Math.max(0, camp.raised - donation.amount) });
+      setCampaigns((prev) => prev.map((c) => (c.id === camp.id ? updated : c)));
+    }
+  };
+
+  // מחיקת/ניתוק התחייבות (התרומות המקושרות נשארות, מתנתקות מההתחייבות)
+  const deletePledge = async (pledgeId) => {
+    await deleteRow('pledges', pledgeId);
+    setPledges((prev) => prev.filter((p) => p.id !== pledgeId));
+    setDonations((prev) => prev.map((d) => (d.pledgeId === pledgeId ? { ...d, pledgeId: null } : d)));
+  };
+
   // שמירת הגדרות הארגון (כולל מפתחות Stripe)
   const saveSettings = async (patch) => {
     if (!settings.id) throw new Error('שורת ההגדרות לא נטענה');
@@ -230,6 +253,7 @@ export function useData() {
     addDonation, addMultiDonation, addRequest, addExpense,
     saveDistribution, markAsPaid,
     addPledge, setPledgeStatus, payPledge, saveSettings,
+    deleteDonation, deletePledge,
     clearAll,
   };
 }

@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Icons } from './Icons.jsx';
 import { DatePicker } from './DatePicker.jsx';
 import { useData } from './useData.js';
-import { startDonationCheckout } from './stripe.js';
+import { startDonationCheckout, runStripeImport } from './stripe.js';
 import { supabase } from './supabaseClient.js';
 import { Login } from './Login.jsx';
 import { ORG, SUPPORT_CATEGORIES, EXPENSE_CATEGORIES, PRIORITY_LEVELS } from './config.js';
@@ -69,6 +69,8 @@ function MainApp() {
   const [payingPledge, setPayingPledge] = useState(null);     // התחייבות שרושמים לה תשלום
   const [historyPledge, setHistoryPledge] = useState(null);   // התחייבות שמציגים את היסטוריית התשלומים שלה
   const [showOnlineDonationModal, setShowOnlineDonationModal] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState('');
 
   // חיפוש ובחירת תורם בהזנת תרומה
   const [selectedDonorId, setSelectedDonorId] = useState('');
@@ -285,6 +287,35 @@ function MainApp() {
 
   const handleMarkAsPaid = (reqId) =>
     run(() => data.markAsPaid(reqId), () => showToast('התמיכה שולמה בהצלחה והועברה לנתמך!'));
+
+  const handleImportStripe = async () => {
+    if (importing) return;
+    if (!settings.stripeSecretKey) { showToast('יש לחבר את Stripe בהגדרות לפני יבוא.', 'error'); return; }
+    if (!window.confirm('לייבא את כל הנתונים מ-Stripe מתחילת השנה? (בטוח להרצה חוזרת — לא ייווצרו כפילויות)')) return;
+    setImporting(true);
+    setImportProgress('מתחיל יבוא...');
+    try {
+      const totals = await runStripeImport(setImportProgress);
+      await data.reload();
+      showToast(`יבוא הושלם: ${totals.pledges} מנויים, ${totals.donations} תשלומים נקלטו.`);
+    } catch (err) {
+      console.error(err);
+      showToast(err.message || 'שגיאה ביבוא מ-Stripe', 'error');
+    } finally {
+      setImporting(false);
+      setImportProgress('');
+    }
+  };
+
+  const handleDeleteDonation = (donation) => {
+    if (!window.confirm('למחוק/לנתק את התרומה הזו מהמערכת? (לא משפיע על Stripe)')) return;
+    run(() => data.deleteDonation(donation), () => showToast('התרומה נמחקה מהמערכת.'));
+  };
+
+  const handleDeletePledge = (pledge) => {
+    if (!window.confirm('למחוק/לנתק את ההתחייבות הזו? התרומות שכבר נרשמו יישארו. (לא מבטל את המנוי ב-Stripe)')) return;
+    run(() => data.deletePledge(pledge.id), () => showToast('ההתחייבות נותקה מהמערכת.'));
+  };
 
   const handleSaveStripeSettings = (patch) =>
     run(() => data.saveSettings(patch), () => showToast('הגדרות ה-Stripe נשמרו בהצלחה.'));
@@ -1007,6 +1038,7 @@ function MainApp() {
                       <th className="p-4">מקור</th>
                       <th className="p-4">תאריך</th>
                       <th className="p-4">סטטוס</th>
+                      <th className="p-4 text-left"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-sm">
@@ -1036,11 +1068,14 @@ function MainApp() {
                           </td>
                           <td className="p-4 text-slate-500">{don.date}</td>
                           <td className="p-4"><span className="px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">{don.status}</span></td>
+                          <td className="p-4 text-left">
+                            <button onClick={() => handleDeleteDonation(don)} title="מחק/נתק תרומה" className="text-slate-300 hover:text-rose-600 font-bold transition">✕</button>
+                          </td>
                         </tr>
                       );
                     })}
                     {donations.length === 0 && (
-                      <tr><td colSpan="6" className="p-8 text-center text-slate-400">אין תרומות עדיין. לחץ "הזנת תרומה" כדי להתחיל.</td></tr>
+                      <tr><td colSpan="7" className="p-8 text-center text-slate-400">אין תרומות עדיין. לחץ "הזנת תרומה" כדי להתחיל.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -1186,6 +1221,7 @@ function MainApp() {
                             ) : p.status === 'paused' ? (
                               <button onClick={() => handleSetPledgeStatus(p.id, 'active')} className="px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 text-xs font-bold rounded-lg transition">הפעל</button>
                             ) : null}
+                            <button onClick={() => handleDeletePledge(p)} title="מחק/נתק התחייבות" className="px-2 py-1 text-slate-300 hover:text-rose-600 text-xs font-bold transition">✕</button>
                           </td>
                         </tr>
                       );
@@ -1618,6 +1654,22 @@ function MainApp() {
                     <p className="text-[11px] text-slate-400">💡 כתובת ה-Webhook להגדרה ב-Stripe: <span className="font-mono" dir="ltr">{window.location.origin}/.netlify/functions/stripe-webhook</span></p>
                     <button type="submit" className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-sm transition">שמור מפתחות Stripe</button>
                   </form>
+                </div>
+
+                <hr className="border-slate-100" />
+
+                <div>
+                  <h3 className="font-extrabold text-slate-900 mb-2 text-base">יבוא נתונים מ-Stripe</h3>
+                  <p className="text-xs text-slate-500 mb-3">שליפת מנויים חוזרים ותשלומים מתחילת השנה אל המערכת. בטוח להרצה חוזרת — לא ייווצרו כפילויות (זיהוי לפי מזהי Stripe).</p>
+                  <button
+                    onClick={handleImportStripe}
+                    disabled={importing || !settings.stripeSecretKey}
+                    className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-sm transition disabled:bg-slate-300 flex items-center gap-2"
+                  >
+                    {importing && <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span>}
+                    {importing ? (importProgress || 'מייבא...') : '⤓ ייבא מ-Stripe (מתחילת השנה)'}
+                  </button>
+                  {!settings.stripeSecretKey && <p className="text-xs text-amber-600 mt-2">יש לחבר Stripe למעלה לפני היבוא.</p>}
                 </div>
 
                 <hr className="border-slate-100" />

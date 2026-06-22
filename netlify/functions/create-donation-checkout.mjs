@@ -1,13 +1,17 @@
-import Stripe from 'stripe';
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+import { getStripe } from './_settings.mjs';
 
 // יוצר Stripe Checkout Session עבור תרומה חד-פעמית ומחזיר את כתובת התשלום.
+// המפתח של Stripe נטען מהגדרות הארגון ב-DB (לא ממשתני סביבה).
 export const handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }
   try {
+    const { stripe } = await getStripe();
+    if (!stripe) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'Stripe טרם הוגדר. הזן את מפתחות ה-Stripe במסך ההגדרות.' }) };
+    }
+
     const { amount, donorId, campaignId, donorName, email } = JSON.parse(event.body || '{}');
     const cents = Math.round(Number(amount) * 100);
     if (!cents || cents < 100) {

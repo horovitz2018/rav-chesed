@@ -45,7 +45,7 @@ function MainApp() {
 
   // מאגרי נתונים — מחוברים ל-Supabase (בסיס נתונים אמיתי)
   const data = useData();
-  const { loading, error, fundraisers, donors, campaigns, recipients, requests, expenses, donations, pledges } = data;
+  const { loading, error, fundraisers, donors, campaigns, recipients, requests, expenses, donations, pledges, settings } = data;
 
   // מצב הזנת תרומה קבוצתית
   const [donationMode, setDonationMode] = useState('single'); // 'single' | 'multi'
@@ -285,6 +285,9 @@ function MainApp() {
 
   const handleMarkAsPaid = (reqId) =>
     run(() => data.markAsPaid(reqId), () => showToast('התמיכה שולמה בהצלחה והועברה לנתמך!'));
+
+  const handleSaveStripeSettings = (patch) =>
+    run(() => data.saveSettings(patch), () => showToast('הגדרות ה-Stripe נשמרו בהצלחה.'));
 
   const handleOnlineDonation = (payload) =>
     run(() => startDonationCheckout(payload)); // מפנה ל-Stripe; אם נכשל — מציג שגיאה
@@ -1581,14 +1584,40 @@ function MainApp() {
 
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6 animate-fadeIn">
                 <div>
-                  <h3 className="font-extrabold text-slate-900 mb-3 text-base">חיבור לשער הסליקה Stripe</h3>
-                  <div className="flex items-center space-x-3 space-x-reverse bg-amber-50 border border-amber-200 p-4 rounded-xl">
-                    <span className="w-3 h-3 bg-amber-500 rounded-full"></span>
-                    <div className="flex-1">
-                      <p className="font-bold text-amber-800 text-sm">סטטוס: Stripe טרם חובר (שלב הבא)</p>
-                      <p className="text-xs text-amber-700">בשלב הבא נחבר את חשבון ה-Stripe שלך כך שכל תרומה מקוונת תיווצר אוטומטית במערכת.</p>
-                    </div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-extrabold text-slate-900 text-base">חיבור לשער הסליקה Stripe</h3>
+                    <span className={`px-3 py-1 text-xs font-bold rounded-full ${settings.stripeSecretKey ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
+                      {settings.stripeSecretKey ? '✓ מחובר' : 'טרם חובר'}
+                    </span>
                   </div>
+                  <p className="text-xs text-slate-500 mb-4">
+                    הזן את מפתחות ה-Stripe של הארגון. המפתחות נשמרים מאובטח ומשמשים לקבלת תרומות אונליין.
+                    מצא אותם ב-Stripe: <span className="font-mono">Developers → API keys</span> ו-<span className="font-mono">Webhooks</span>.
+                  </p>
+                  <form onSubmit={(e) => {
+                    e.preventDefault();
+                    const fd = new FormData(e.target);
+                    const patch = {};
+                    const sk = fd.get('stripeSecretKey').trim();
+                    const wh = fd.get('stripeWebhookSecret').trim();
+                    if (sk) patch.stripeSecretKey = sk;
+                    if (wh) patch.stripeWebhookSecret = wh;
+                    patch.stripeEnabled = !!(sk || settings.stripeSecretKey);
+                    if (Object.keys(patch).length === 1 && !sk && !wh) { showToast('לא הוזנו מפתחות חדשים', 'error'); return; }
+                    handleSaveStripeSettings(patch);
+                    e.target.reset();
+                  }} className="space-y-3 text-sm bg-slate-50 p-4 rounded-xl border border-slate-100">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 mb-1">Secret Key (sk_...)</label>
+                      <input name="stripeSecretKey" type="password" dir="ltr" placeholder={settings.stripeSecretKey ? '•••••••• (שמור — הזן רק כדי להחליף)' : 'sk_test_...'} className="w-full border border-slate-200 rounded-lg p-2 font-mono" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 mb-1">Webhook Signing Secret (whsec_...)</label>
+                      <input name="stripeWebhookSecret" type="password" dir="ltr" placeholder={settings.stripeWebhookSecret ? '•••••••• (שמור — הזן רק כדי להחליף)' : 'whsec_...'} className="w-full border border-slate-200 rounded-lg p-2 font-mono" />
+                    </div>
+                    <p className="text-[11px] text-slate-400">💡 כתובת ה-Webhook להגדרה ב-Stripe: <span className="font-mono" dir="ltr">{window.location.origin}/.netlify/functions/stripe-webhook</span></p>
+                    <button type="submit" className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-sm transition">שמור מפתחות Stripe</button>
+                  </form>
                 </div>
 
                 <hr className="border-slate-100" />

@@ -1,12 +1,4 @@
-import Stripe from 'stripe';
-import { createClient } from '@supabase/supabase-js';
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-// לקוח Supabase עם service_role — כותב לבסיס הנתונים מצד השרת (עוקף RLS)
-const supabase = createClient(
-  process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-);
+import { getStripe, supabase } from './_settings.mjs';
 
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -35,11 +27,16 @@ async function recordDonation({ donorId, campaignId, amount, stripeId, pledgeId,
 }
 
 export const handler = async (event) => {
+  const { stripe, settings } = await getStripe();
+  if (!stripe || !settings.stripe_webhook_secret) {
+    return { statusCode: 400, body: 'Stripe webhook not configured' };
+  }
+
   const sig = event.headers['stripe-signature'];
   let evt;
   try {
     const raw = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
-    evt = stripe.webhooks.constructEvent(raw, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    evt = stripe.webhooks.constructEvent(raw, sig, settings.stripe_webhook_secret);
   } catch (e) {
     return { statusCode: 400, body: `Webhook signature error: ${e.message}` };
   }
@@ -73,17 +70,6 @@ export const handler = async (event) => {
             stripeId: inv.payment_intent || inv.id,
             pledgeId: md.pledgeId,
           });
-        }
-        break;
-      }
-
-      // תשלום מנוי נכשל (כרטיס נדחה) — יסומן כפיגור בשלב המנויים
-      case 'invoice.payment_failed': {
-        const inv = evt.data.object;
-        const md = (inv.subscription_details && inv.subscription_details.metadata) || inv.metadata || {};
-        if (md.pledgeId) {
-          await supabase.from('pledges').update({ status: 'active' }).eq('id', md.pledgeId);
-          // (סימון הפיגור נגזר אוטומטית במסך — אין תשלום לחודש זה)
         }
         break;
       }

@@ -15,6 +15,7 @@ export function useData() {
   const [expenses, setExpenses] = useState([]);
   const [donations, setDonations] = useState([]);
   const [pledges, setPledges] = useState([]);
+  const [settings, setSettings] = useState({});
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -29,6 +30,8 @@ export function useData() {
       setExpenses(e.reverse());      // הוצאות: חדש→ישן
       setDonations(don.reverse());   // תרומות: חדש→ישן
       setPledges(pl);
+      const st = await fetchTable('app_settings');
+      setSettings(st[0] || {});
     } catch (err) {
       console.error(err);
       setError(err.message || 'שגיאה בטעינת הנתונים מהשרת');
@@ -207,6 +210,14 @@ export function useData() {
     });
   };
 
+  // שמירת הגדרות הארגון (כולל מפתחות Stripe)
+  const saveSettings = async (patch) => {
+    if (!settings.id) throw new Error('שורת ההגדרות לא נטענה');
+    const updated = await updateRow('app_settings', settings.id, { ...patch, updatedAt: new Date().toISOString() });
+    setSettings(updated);
+    return updated;
+  };
+
   const clearAll = async () => {
     for (const t of [...TABLES].reverse()) await deleteAllRows(t);
     await loadAll();
@@ -214,11 +225,11 @@ export function useData() {
 
   return {
     loading, error, reload: loadAll,
-    fundraisers, donors, campaigns, recipients, requests, expenses, donations, pledges,
+    fundraisers, donors, campaigns, recipients, requests, expenses, donations, pledges, settings,
     addFundraiser, addDonor, assignFundraiser, addRecipient,
     addDonation, addMultiDonation, addRequest, addExpense,
     saveDistribution, markAsPaid,
-    addPledge, setPledgeStatus, payPledge,
+    addPledge, setPledgeStatus, payPledge, saveSettings,
     clearAll,
   };
 }

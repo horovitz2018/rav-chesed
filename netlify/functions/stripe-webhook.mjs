@@ -35,12 +35,18 @@ async function recordDonation(d) {
 
   let inserted = true;
   if (d.checkoutSessionId) {
-    // אידמפוטנטיות קשיחה לפי מזהה ה-Checkout Session (ON CONFLICT DO NOTHING)
-    const { data } = await supabase
-      .from('donations')
-      .upsert(row, { onConflict: 'stripe_checkout_session_id', ignoreDuplicates: true })
-      .select('id');
-    inserted = !!(data && data.length);
+    // אידמפוטנטיות לפי מזהה ה-Checkout Session.
+    // בדיקה-ואז-insert; האינדקס הייחודי (החלקי) תופס מצב race דרך שגיאת 23505.
+    const { data: exists } = await supabase.from('donations').select('id').eq('stripe_checkout_session_id', d.checkoutSessionId).maybeSingle();
+    if (exists) {
+      inserted = false;
+    } else {
+      const { error } = await supabase.from('donations').insert(row);
+      if (error) {
+        if (error.code === '23505') inserted = false; // משלוח כפול במקביל — נתפס ע"י האינדקס הייחודי
+        else throw error;
+      }
+    }
   } else if (row.stripe_payment_intent_id) {
     const { data: exists } = await supabase.from('donations').select('id').eq('stripe_payment_intent_id', row.stripe_payment_intent_id).maybeSingle();
     if (exists) inserted = false;

@@ -11,40 +11,49 @@ async function increment(table, id, column, delta) {
 }
 
 // רישום תרומה אידמפוטנטי + עדכון התורם והמגבית.
-// מחזיר true רק אם נרשמה תרומה חדשה (כדי לא לעדכן סכומים פעמיים).
-async function recordDonation({ donorId, campaignId, amount, stripeId, pledgeId, date, checkoutSessionId }) {
+// מחזיר true רק אם נרשמה שורה חדשה (כדי לא לעדכן סכומים פעמיים).
+async function recordDonation(d) {
+  const paidAtIso = d.paidAt || new Date().toISOString();
   const row = {
-    donor_id: donorId || null,
-    amount,
-    campaign_id: campaignId || null,
+    donor_id: d.donorId || null,
+    amount: d.amount,
+    currency: d.currency || 'eur',
+    campaign_id: d.campaignId || null,
     source: 'Stripe',
-    date: date || today(),
+    date: (d.date || paidAtIso).slice(0, 10),
     status: 'הושלם',
-    stripe_id: stripeId || null,
-    pledge_id: pledgeId || null,
-    stripe_checkout_session_id: checkoutSessionId || null,
+    stripe_id: d.stripePaymentIntentId || d.stripeId || null,
+    stripe_payment_intent_id: d.stripePaymentIntentId || null,
+    stripe_customer_id: d.stripeCustomerId || null,
+    stripe_subscription_id: d.stripeSubscriptionId || null,
+    stripe_checkout_session_id: d.checkoutSessionId || null,
+    donor_email: d.donorEmail || null,
+    donor_name: d.donorName || null,
+    paid_at: paidAtIso,
+    pledge_id: d.pledgeId || null,
   };
 
   let inserted = true;
-  if (checkoutSessionId) {
-    // אידמפוטנטיות קשיחה לפי מזהה ה-Checkout Session (אינדקס ייחודי)
+  if (d.checkoutSessionId) {
+    // אידמפוטנטיות קשיחה לפי מזהה ה-Checkout Session (ON CONFLICT DO NOTHING)
     const { data } = await supabase
       .from('donations')
       .upsert(row, { onConflict: 'stripe_checkout_session_id', ignoreDuplicates: true })
       .select('id');
     inserted = !!(data && data.length);
+  } else if (row.stripe_payment_intent_id) {
+    const { data: exists } = await supabase.from('donations').select('id').eq('stripe_payment_intent_id', row.stripe_payment_intent_id).maybeSingle();
+    if (exists) inserted = false;
+    else await supabase.from('donations').insert(row);
   } else {
-    // עבור חשבוניות מנוי — בדיקה לפי stripe_id למניעת כפילות
-    if (stripeId) {
-      const { data: exists } = await supabase.from('donations').select('id').eq('stripe_id', stripeId).maybeSingle();
-      if (exists) inserted = false;
-    }
-    if (inserted) await supabase.from('donations').insert(row);
+    await supabase.from('donations').insert(row);
   }
 
   if (inserted) {
-    await increment('donors', donorId, 'total_donated', amount);
-    await increment('campaigns', campaignId, 'raised', amount);
+    await increment('donors', row.donor_id, 'total_donated', d.amount);
+    await increment('campaigns', row.campaign_id, 'raised', d.amount);
+  } else {
+    console.log(`duplicate ignored: ${d.checkoutSessionId || row.stripe_payment_intent_id}`);
   }
   return inserted;
 }
@@ -76,23 +85,36 @@ export const handler = async (event) => {
             donorId: md.donorId,
             campaignId: md.campaignId,
             amount: (s.amount_total || 0) / 100,
-            stripeId: s.payment_intent || s.id,
+            currency: s.currency,
+            stripePaymentIntentId: s.payment_intent,
+            stripeCustomerId: typeof s.customer === 'string' ? s.customer : s.customer?.id,
+            stripeSubscriptionId: s.subscription || null,
             checkoutSessionId: s.id,
+            donorEmail: s.customer_details?.email || s.customer_email || null,
+            donorName: s.customer_details?.name || md.donorName || null,
+            paidAt: new Date((s.created || Date.now() / 1000) * 1000).toISOString(),
           });
         }
         break;
       }
 
-      // תשלום מנוי (הו"ק) נגבה בהצלחה — יטופל בשלב המנויים
+      // תשלום מנוי (הו"ק) נגבה בהצלחה
       case 'invoice.paid': {
         const inv = evt.data.object;
         const md = (inv.subscription_details && inv.subscription_details.metadata) || inv.metadata || {};
         if (md.pledgeId) {
+          const paidUnix = inv.status_transitions?.paid_at || inv.created;
           await recordDonation({
             donorId: md.donorId,
             campaignId: md.campaignId,
             amount: (inv.amount_paid || 0) / 100,
-            stripeId: inv.payment_intent || inv.id,
+            currency: inv.currency,
+            stripePaymentIntentId: inv.payment_intent,
+            stripeCustomerId: typeof inv.customer === 'string' ? inv.customer : inv.customer?.id,
+            stripeSubscriptionId: inv.subscription || null,
+            donorEmail: inv.customer_email || null,
+            donorName: inv.customer_name || null,
+            paidAt: new Date((paidUnix || Date.now() / 1000) * 1000).toISOString(),
             pledgeId: md.pledgeId,
           });
         }
@@ -102,8 +124,10 @@ export const handler = async (event) => {
       default:
         break;
     }
+    // מחזיר 200 תמיד לאחר טיפול בטוח (כולל כפילויות) — כדי ש-Stripe לא ינסה שוב
     return { statusCode: 200, body: JSON.stringify({ received: true }) };
   } catch (e) {
+    console.error('webhook error:', e.message);
     return { statusCode: 500, body: JSON.stringify({ error: e.message }) };
   }
 };

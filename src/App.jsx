@@ -71,6 +71,13 @@ function MainApp() {
   const [showOnlineDonationModal, setShowOnlineDonationModal] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState('');
+  const [showCampaignModal, setShowCampaignModal] = useState(false);   // יצירה/עריכת מגבית
+  const [editingCampaign, setEditingCampaign] = useState(null);        // מגבית בעריכה (null = חדשה)
+  const [campaignDetail, setCampaignDetail] = useState(null);          // מגבית פתוחה לרישום תרומות
+  const [campaignAmounts, setCampaignAmounts] = useState({});          // סכום זמני פר-תורם במסך המגבית
+  const [savingDonorId, setSavingDonorId] = useState(null);            // מניעת שליחה כפולה
+  const [campaignSearch, setCampaignSearch] = useState('');
+  const [campaignFilter, setCampaignFilter] = useState('all');         // all | donated | not
 
   // חיפוש ובחירת תורם בהזנת תרומה
   const [selectedDonorId, setSelectedDonorId] = useState('');
@@ -198,6 +205,10 @@ function MainApp() {
     };
   }, [pledges, donations]);
 
+  // רשימות קבוצות/תת-קבוצות קיימות (להשלמה אוטומטית)
+  const donorGroups = useMemo(() => [...new Set(donors.map(d => d.groupName).filter(Boolean))].sort(), [donors]);
+  const donorSubgroups = useMemo(() => [...new Set(donors.map(d => d.subgroupName).filter(Boolean))].sort(), [donors]);
+
   // סינון תורמים דינמי עבור שדה חיפוש
   const filteredDonorsForDonation = useMemo(() => {
     const query = donorSearchText.trim().toLowerCase();
@@ -314,6 +325,64 @@ function MainApp() {
   const handleDeletePledge = (pledge) => {
     if (!window.confirm('למחוק/לנתק את ההתחייבות הזו? התרומות שכבר נרשמו יישארו. (לא מבטל את המנוי ב-Stripe)')) return;
     run(() => data.deletePledge(pledge.id), () => showToast('ההתחייבות נותקה מהמערכת.'));
+  };
+
+  // ─── מגביות ───
+  const handleUpdateDonor = (id, patch) =>
+    run(() => data.updateDonor(id, patch));
+
+  const handleSaveCampaign = (campData) => {
+    if (editingCampaign) {
+      run(() => data.updateCampaign(editingCampaign.id, campData), () => {
+        showToast(`המגבית "${campData.name}" עודכנה.`);
+        setShowCampaignModal(false);
+        setEditingCampaign(null);
+      });
+    } else {
+      run(() => data.addCampaign(campData), () => {
+        showToast(`המגבית "${campData.name}" נוצרה.`);
+        setShowCampaignModal(false);
+      });
+    }
+  };
+
+  const handleDeleteCampaign = (camp) => {
+    if (donations.some(d => d.campaignId === camp.id)) {
+      showToast('לא ניתן למחוק מגבית שכבר נרשמו אליה תרומות.', 'error');
+      return;
+    }
+    if (!window.confirm(`למחוק את המגבית "${camp.name}"?`)) return;
+    run(() => data.deleteCampaign(camp.id), () => showToast('המגבית נמחקה.'));
+  };
+
+  // קהל היעד של מגבית
+  const campaignAudience = (camp) => {
+    if (!camp || camp.audienceType !== 'group') return donors; // 'general' → כל התורמים
+    return donors.filter(d =>
+      d.groupName === camp.audienceGroup &&
+      (!camp.audienceSubgroup || d.subgroupName === camp.audienceSubgroup)
+    );
+  };
+
+  // תווית קהל לכרטיס המגבית
+  const audienceLabel = (camp) => {
+    if (camp.audienceType !== 'group') return 'מגבית כללית';
+    return camp.audienceSubgroup ? `קבוצה: ${camp.audienceGroup} / ${camp.audienceSubgroup}` : `קבוצה: ${camp.audienceGroup}`;
+  };
+
+  // רישום תרומה לתורם מתוך מסך המגבית
+  const handleCampaignDonation = (donor, camp) => {
+    const amount = Number(campaignAmounts[donor.id]);
+    if (!amount || amount <= 0) { showToast('יש להזין סכום תקין', 'error'); return; }
+    if (savingDonorId) return; // מניעת שליחה כפולה
+    setSavingDonorId(donor.id);
+    run(
+      () => data.addDonation({ donorId: donor.id, amount, campaignId: camp.id, source: 'ידני' }),
+      () => {
+        showToast(`נרשמה תרומה של ${C}${amount.toLocaleString()} מ${donor.name}.`);
+        setCampaignAmounts(prev => { const n = { ...prev }; delete n[donor.id]; return n; });
+      }
+    ).finally(() => setSavingDonorId(null));
   };
 
   const handleOnlineDonation = (payload) =>
@@ -458,6 +527,10 @@ function MainApp() {
           <p className="text-sm font-semibold">{toast.message}</p>
         </div>
       )}
+
+      {/* רשימות השלמה לקבוצות/תת-קבוצות */}
+      <datalist id="donor-groups">{donorGroups.map(g => <option key={g} value={g} />)}</datalist>
+      <datalist id="donor-subgroups">{donorSubgroups.map(g => <option key={g} value={g} />)}</datalist>
 
       {/* Header */}
       <div className="bg-gradient-to-r from-blue-700 via-indigo-800 to-indigo-900 text-white px-6 py-3 flex flex-wrap items-center justify-between gap-4 shadow-md">
@@ -864,13 +937,15 @@ function MainApp() {
               )}
 
               {(currentRole !== 'Committee' || committeeApprovedAccess) && (
-                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
-                  <table className="w-full text-right border-collapse">
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto shadow-sm">
+                  <table className="w-full text-right border-collapse min-w-[920px]">
                     <thead>
                       <tr className="bg-slate-50 text-slate-400 text-xs font-bold border-b border-slate-200">
                         <th className="p-4">שם התורם</th>
                         <th className="p-4">אימייל וטלפון</th>
                         <th className="p-4">עיר</th>
+                        <th className="p-4">קבוצה ראשית</th>
+                        <th className="p-4">תת־קבוצה</th>
                         <th className="p-4">מתרים אחראי</th>
                         <th className="p-4 text-left">סה"כ נתרם</th>
                       </tr>
@@ -884,6 +959,22 @@ function MainApp() {
                             <div className="text-xs text-slate-400">{donor.phone}</div>
                           </td>
                           <td className="p-4 text-slate-500">{donor.city}</td>
+                          <td className="p-4">
+                            <input
+                              list="donor-groups" defaultValue={donor.groupName || ''}
+                              onBlur={(e) => { const v = e.target.value.trim(); if (v !== (donor.groupName || '')) handleUpdateDonor(donor.id, { groupName: v }); }}
+                              placeholder="—"
+                              className="w-28 text-xs bg-slate-50 border border-slate-200 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-400 transition"
+                            />
+                          </td>
+                          <td className="p-4">
+                            <input
+                              list="donor-subgroups" defaultValue={donor.subgroupName || ''}
+                              onBlur={(e) => { const v = e.target.value.trim(); if (v !== (donor.subgroupName || '')) handleUpdateDonor(donor.id, { subgroupName: v }); }}
+                              placeholder="—"
+                              className="w-28 text-xs bg-slate-50 border border-slate-200 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-400 transition"
+                            />
+                          </td>
                           <td className="p-4">
                             <select
                               value={donor.assignedFundraiserId}
@@ -899,7 +990,7 @@ function MainApp() {
                         </tr>
                       ))}
                       {visibleDonors.length === 0 && (
-                        <tr><td colSpan="5" className="p-8 text-center text-slate-400">אין תורמים עדיין. הוסף תורם ראשון!</td></tr>
+                        <tr><td colSpan="7" className="p-8 text-center text-slate-400">אין תורמים עדיין. הוסף תורם ראשון!</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -1237,17 +1328,25 @@ function MainApp() {
               <div className="flex justify-between items-center">
                 <div>
                   <h2 className="text-2xl font-black text-slate-900">ניהול מגביות וקרנות</h2>
-                  <p className="text-slate-500">קמפיינים פעילים, יעדים וביצועים</p>
+                  <p className="text-slate-500">קמפיינים פעילים, יעדים, מיקוד לקבוצות וביצועים</p>
                 </div>
+                <button
+                  onClick={() => { setEditingCampaign(null); setShowCampaignModal(true); }}
+                  className="flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold transition shadow-sm"
+                >
+                  <Icons.Plus /> מגבית חדשה
+                </button>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 {campaigns.map(camp => {
                   const percent = Math.min(100, Math.round((camp.raised / Math.max(1, camp.target)) * 100));
+                  const hasDonations = donations.some(d => d.campaignId === camp.id);
                   return (
                     <div key={camp.id} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
                       <div>
-                        <div className="flex justify-between items-start mb-3">
-                          <span className="px-2.5 py-1 text-xs bg-slate-100 text-slate-600 rounded-md font-bold">{camp.category}</span>
+                        <div className="flex justify-between items-start mb-3 gap-2">
+                          {camp.category && <span className="px-2.5 py-1 text-xs bg-slate-100 text-slate-600 rounded-md font-bold">{camp.category}</span>}
+                          <span className={`px-2.5 py-1 text-xs rounded-md font-bold ${camp.audienceType === 'group' ? 'bg-indigo-50 text-indigo-700' : 'bg-emerald-50 text-emerald-700'}`}>{audienceLabel(camp)}</span>
                         </div>
                         <h3 className="font-extrabold text-lg text-slate-900 mb-4">{camp.name}</h3>
                         <div className="space-y-2">
@@ -1260,16 +1359,32 @@ function MainApp() {
                           </div>
                         </div>
                       </div>
-                      <div className="mt-6 pt-4 border-t border-slate-100 flex justify-between items-center">
-                        <div>
-                          <p className="text-xs text-slate-400">גויס בפועל</p>
-                          <p className="font-black text-emerald-600 text-lg">{C}{camp.raised.toLocaleString()}</p>
+                      <div className="mt-6 pt-4 border-t border-slate-100">
+                        <div className="flex justify-between items-center mb-3">
+                          <div>
+                            <p className="text-xs text-slate-400">גויס בפועל</p>
+                            <p className="font-black text-emerald-600 text-lg">{C}{camp.raised.toLocaleString()}</p>
+                          </div>
+                          <button onClick={() => { setCampaignDetail(camp); setCampaignAmounts({}); setCampaignSearch(''); setCampaignFilter('all'); }} className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition">רשום תרומות</button>
                         </div>
-                        <button onClick={() => { setSelectedDonorId(''); setDonorSearchText(''); setShowDonorDropdown(false); setShowAddDonationModal(true); }} className="px-3.5 py-1.5 bg-slate-50 text-slate-700 hover:bg-slate-100 font-bold text-xs rounded-xl transition">שייך תרומה</button>
+                        <div className="flex gap-2">
+                          <button onClick={() => { setEditingCampaign(camp); setShowCampaignModal(true); }} className="flex-1 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-lg transition">עריכה</button>
+                          <button
+                            onClick={() => handleDeleteCampaign(camp)}
+                            disabled={hasDonations}
+                            title={hasDonations ? 'לא ניתן למחוק מגבית עם תרומות' : 'מחק מגבית'}
+                            className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            מחק
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
                 })}
+                {campaigns.length === 0 && (
+                  <div className="md:col-span-3 bg-white p-8 rounded-2xl border border-slate-200 text-center text-slate-400">אין מגביות עדיין. לחץ "מגבית חדשה" כדי להתחיל.</div>
+                )}
               </div>
             </div>
           )}
@@ -1710,12 +1825,16 @@ function MainApp() {
           <form onSubmit={(e) => {
             e.preventDefault();
             const fd = new FormData(e.target);
-            handleAddDonor({ name: fd.get('name'), email: fd.get('email'), phone: fd.get('phone'), city: fd.get('city'), assignedFundraiserId: fd.get('assignedFundraiserId') });
+            handleAddDonor({ name: fd.get('name'), email: fd.get('email'), phone: fd.get('phone'), city: fd.get('city'), groupName: fd.get('groupName'), subgroupName: fd.get('subgroupName'), assignedFundraiserId: fd.get('assignedFundraiserId') });
           }} className="space-y-3 text-sm">
             <Field label="שם מלא"><input required name="name" type="text" className="modal-input" /></Field>
             <Field label="כתובת אימייל"><input name="email" type="email" className="modal-input" /></Field>
             <Field label="מספר טלפון"><input required name="phone" type="text" className="modal-input" /></Field>
             <Field label="עיר מגורים"><input name="city" type="text" className="modal-input" /></Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label='קבוצה ראשית (לדוגמה אנ"ש)'><input name="groupName" list="donor-groups" type="text" className="modal-input" placeholder="קבוצה" /></Field>
+              <Field label="תת־קבוצה (לדוגמה בית כנסת)"><input name="subgroupName" list="donor-subgroups" type="text" className="modal-input" placeholder="תת־קבוצה" /></Field>
+            </div>
             <Field label="שייך למתרים אחראי">
               <select name="assignedFundraiserId" className="modal-input">
                 {fundraisers.map(f => (<option key={f.id} value={f.id}>{f.name}</option>))}
@@ -1781,6 +1900,93 @@ function MainApp() {
           </form>
         </Modal>
       )}
+
+      {/* Add/Edit Campaign */}
+      {showCampaignModal && (
+        <CampaignModal
+          campaign={editingCampaign}
+          onClose={() => { setShowCampaignModal(false); setEditingCampaign(null); }}
+          onSave={handleSaveCampaign}
+        />
+      )}
+
+      {/* Campaign detail — record donations across audience */}
+      {campaignDetail && (() => {
+        const camp = campaignDetail;
+        const audience = campaignAudience(camp);
+        const q = campaignSearch.trim().toLowerCase();
+        const totalFor = (donorId) => donations.filter(d => d.campaignId === camp.id && d.donorId === donorId).reduce((s, d) => s + d.amount, 0);
+        const rows = audience
+          .map(donor => { const total = totalFor(donor.id); return { donor, total, donated: total > 0 }; })
+          .filter(r => {
+            if (campaignFilter === 'donated' && !r.donated) return false;
+            if (campaignFilter === 'not' && r.donated) return false;
+            if (!q) return true;
+            return [r.donor.name, r.donor.groupName, r.donor.subgroupName].some(v => (v || '').toLowerCase().includes(q));
+          });
+        const donatedCount = audience.filter(d => totalFor(d.id) > 0).length;
+        const totalRaised = donations.filter(d => d.campaignId === camp.id).reduce((s, d) => s + d.amount, 0);
+        const pct = audience.length ? Math.round((donatedCount / audience.length) * 100) : 0;
+        return (
+          <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl max-w-2xl w-full p-6 shadow-2xl border border-slate-100 space-y-4 max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-start border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-xl font-extrabold text-slate-900">{camp.name}</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">{audienceLabel(camp)} · יעד {C}{camp.target.toLocaleString()}</p>
+                </div>
+                <button onClick={() => setCampaignDetail(null)} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
+              </div>
+
+              <div className="grid grid-cols-4 gap-3 text-center">
+                <div className="bg-slate-50 rounded-xl p-3"><p className="text-[11px] text-slate-400">בקהל</p><p className="text-lg font-black text-slate-900">{audience.length}</p></div>
+                <div className="bg-slate-50 rounded-xl p-3"><p className="text-[11px] text-slate-400">תרמו</p><p className="text-lg font-black text-emerald-600">{donatedCount}</p></div>
+                <div className="bg-slate-50 rounded-xl p-3"><p className="text-[11px] text-slate-400">גויס</p><p className="text-lg font-black text-indigo-600">{C}{totalRaised.toLocaleString()}</p></div>
+                <div className="bg-slate-50 rounded-xl p-3"><p className="text-[11px] text-slate-400">השתתפות</p><p className="text-lg font-black text-slate-900">{pct}%</p></div>
+              </div>
+
+              <div className="flex gap-2">
+                <input value={campaignSearch} onChange={e => setCampaignSearch(e.target.value)} placeholder="חיפוש לפי שם / קבוצה / תת־קבוצה..." className="flex-1 border border-slate-200 rounded-lg p-2 text-sm focus:ring-2 focus:ring-indigo-400 focus:outline-none" />
+                <select value={campaignFilter} onChange={e => setCampaignFilter(e.target.value)} className="border border-slate-200 rounded-lg p-2 text-sm">
+                  <option value="all">כולם</option>
+                  <option value="donated">תרמו</option>
+                  <option value="not">לא תרמו</option>
+                </select>
+              </div>
+
+              <div className="border border-slate-100 rounded-xl divide-y divide-slate-100 max-h-80 overflow-y-auto">
+                {rows.map(({ donor, total, donated }) => (
+                  <div key={donor.id} className="flex items-center gap-3 p-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-slate-800 text-sm truncate">
+                        {donor.name}
+                        {donated && <span className="mr-2 text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded-full font-bold">✓ {C}{total.toLocaleString()}</span>}
+                      </p>
+                      <p className="text-[11px] text-slate-400 truncate">{[donor.groupName, donor.subgroupName].filter(Boolean).join(' / ') || '—'}</p>
+                    </div>
+                    <input
+                      type="number" min="1"
+                      value={campaignAmounts[donor.id] || ''}
+                      onChange={e => setCampaignAmounts(prev => ({ ...prev, [donor.id]: e.target.value }))}
+                      placeholder={C} className="w-24 border border-slate-200 rounded-lg px-2 py-1.5 text-sm"
+                    />
+                    <button onClick={() => handleCampaignDonation(donor, camp)} disabled={savingDonorId === donor.id} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition disabled:bg-slate-300">
+                      {savingDonorId === donor.id ? '...' : 'רשום'}
+                    </button>
+                  </div>
+                ))}
+                {rows.length === 0 && (
+                  <p className="p-6 text-center text-sm text-slate-400">{audience.length === 0 ? 'אין תורמים בקהל היעד. שייך תורמים לקבוצה זו במסך התורמים.' : 'אין תוצאות לסינון.'}</p>
+                )}
+              </div>
+
+              <div className="flex justify-end">
+                <button onClick={() => setCampaignDetail(null)} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg">סגור</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Online Donation (Stripe Checkout) */}
       {showOnlineDonationModal && (
@@ -2071,6 +2277,46 @@ function ModalButtons({ onCancel, submitLabel, submitClass }) {
       <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg">ביטול</button>
       <button type="submit" className={`px-4 py-2 text-white font-bold rounded-lg ${submitClass}`}>{submitLabel}</button>
     </div>
+  );
+}
+
+// ─── מודל יצירה/עריכת מגבית ───
+function CampaignModal({ campaign, onSave, onClose }) {
+  const [name, setName] = useState(campaign?.name || '');
+  const [target, setTarget] = useState(campaign?.target ?? '');
+  const [category, setCategory] = useState(campaign?.category || '');
+  const [audienceType, setAudienceType] = useState(campaign?.audienceType || 'general');
+  const [audienceGroup, setAudienceGroup] = useState(campaign?.audienceGroup || '');
+  const [audienceSubgroup, setAudienceSubgroup] = useState(campaign?.audienceSubgroup || '');
+
+  const submit = (e) => {
+    e.preventDefault();
+    onSave({ name, target: Number(target), category, audienceType, audienceGroup, audienceSubgroup });
+  };
+
+  return (
+    <Modal onClose={onClose} title={campaign ? 'עריכת מגבית' : 'מגבית חדשה'}>
+      <form onSubmit={submit} className="space-y-3 text-sm">
+        <Field label="שם המגבית"><input required value={name} onChange={(e) => setName(e.target.value)} className="modal-input" /></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={`יעד גיוס (${C})`}><input required type="number" min="0" value={target} onChange={(e) => setTarget(e.target.value)} className="modal-input" /></Field>
+          <Field label="קטגוריה"><input value={category} onChange={(e) => setCategory(e.target.value)} className="modal-input" placeholder="לדוגמה: מענקי חגים" /></Field>
+        </div>
+        <Field label="סוג מגבית">
+          <select value={audienceType} onChange={(e) => setAudienceType(e.target.value)} className="modal-input">
+            <option value="general">מגבית כללית</option>
+            <option value="group">מגבית לפי קבוצה</option>
+          </select>
+        </Field>
+        {audienceType === 'group' && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label='קבוצה ראשית (אנ"ש)'><input required list="donor-groups" value={audienceGroup} onChange={(e) => setAudienceGroup(e.target.value)} className="modal-input" /></Field>
+            <Field label="תת־קבוצה (בית כנסת — אופציונלי)"><input list="donor-subgroups" value={audienceSubgroup} onChange={(e) => setAudienceSubgroup(e.target.value)} className="modal-input" /></Field>
+          </div>
+        )}
+        <ModalButtons onCancel={onClose} submitLabel={campaign ? 'שמור שינויים' : 'צור מגבית'} submitClass="bg-indigo-600 hover:bg-indigo-700" />
+      </form>
+    </Modal>
   );
 }
 

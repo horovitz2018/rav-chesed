@@ -50,14 +50,27 @@ export function useData() {
     return created;
   };
 
+  const clean = (v) => { const t = (v ?? '').toString().trim(); return t === '' ? null : t; };
+
   const addDonor = async (donorData) => {
     const created = await insertRow('donors', {
       ...donorData,
+      groupName: clean(donorData.groupName),
+      subgroupName: clean(donorData.subgroupName),
       totalDonated: 0,
       assignedFundraiserId: donorData.assignedFundraiserId || fundraisers[0]?.id || null,
     });
     setDonors((prev) => [...prev, created]);
     return created;
+  };
+
+  const updateDonor = async (id, patch) => {
+    const p = { ...patch };
+    if ('groupName' in p) p.groupName = clean(p.groupName);
+    if ('subgroupName' in p) p.subgroupName = clean(p.subgroupName);
+    const updated = await updateRow('donors', id, p);
+    setDonors((prev) => prev.map((d) => (d.id === id ? updated : d)));
+    return updated;
   };
 
   const assignFundraiser = async (donorId, fundraiserId) => {
@@ -210,6 +223,42 @@ export function useData() {
     });
   };
 
+  // ─── מגביות ───
+  const addCampaign = async (campData) => {
+    const isGroup = campData.audienceType === 'group';
+    const created = await insertRow('campaigns', {
+      name: campData.name,
+      target: Number(campData.target) || 0,
+      category: clean(campData.category),
+      audienceType: isGroup ? 'group' : 'general',
+      audienceGroup: isGroup ? clean(campData.audienceGroup) : null,
+      audienceSubgroup: isGroup ? clean(campData.audienceSubgroup) : null,
+      raised: 0,
+    });
+    setCampaigns((prev) => [...prev, created]);
+    return created;
+  };
+
+  const updateCampaign = async (id, patch) => {
+    const p = { ...patch };
+    if ('target' in p) p.target = Number(p.target) || 0;
+    if ('category' in p) p.category = clean(p.category);
+    if ('audienceType' in p) {
+      const isGroup = p.audienceType === 'group';
+      p.audienceType = isGroup ? 'group' : 'general';
+      p.audienceGroup = isGroup ? clean(p.audienceGroup) : null;
+      p.audienceSubgroup = isGroup ? clean(p.audienceSubgroup) : null;
+    }
+    const updated = await updateRow('campaigns', id, p);
+    setCampaigns((prev) => prev.map((c) => (c.id === id ? updated : c)));
+    return updated;
+  };
+
+  const deleteCampaign = async (id) => {
+    await deleteRow('campaigns', id);
+    setCampaigns((prev) => prev.filter((c) => c.id !== id));
+  };
+
   // מחיקת/ניתוק תרומה — מסיר את הרשומה ומעדכן בחזרה את התורם והמגבית
   const deleteDonation = async (donation) => {
     await deleteRow('donations', donation.id);
@@ -249,10 +298,11 @@ export function useData() {
   return {
     loading, error, reload: loadAll,
     fundraisers, donors, campaigns, recipients, requests, expenses, donations, pledges, settings,
-    addFundraiser, addDonor, assignFundraiser, addRecipient,
+    addFundraiser, addDonor, assignFundraiser, updateDonor, addRecipient,
     addDonation, addMultiDonation, addRequest, addExpense,
     saveDistribution, markAsPaid,
     addPledge, setPledgeStatus, payPledge, saveSettings,
+    addCampaign, updateCampaign, deleteCampaign,
     deleteDonation, deletePledge,
     clearAll,
   };

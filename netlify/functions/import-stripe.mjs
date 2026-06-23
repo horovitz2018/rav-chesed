@@ -56,8 +56,8 @@ async function resolveDonors(customers) {
 
 export const handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
-  const { stripe } = await getStripe();
-  if (!stripe) return { statusCode: 400, body: JSON.stringify({ error: 'Stripe טרם הוגדר.' }) };
+  const { stripe } = getStripe();
+  if (!stripe) return { statusCode: 400, body: JSON.stringify({ error: 'Stripe טרם הוגדר (חסר STRIPE_SECRET_KEY).' }) };
 
   try {
     const { phase, cursor } = JSON.parse(event.body || '{}');

@@ -27,8 +27,9 @@ async function recordDonation({ donorId, campaignId, amount, stripeId, pledgeId,
 }
 
 export const handler = async (event) => {
-  const { stripe, secrets } = await getStripe();
-  if (!stripe || !secrets.stripe_webhook_secret) {
+  const { stripe } = getStripe();
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!stripe || !webhookSecret) {
     return { statusCode: 400, body: 'Stripe webhook not configured' };
   }
 
@@ -36,7 +37,7 @@ export const handler = async (event) => {
   let evt;
   try {
     const raw = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
-    evt = stripe.webhooks.constructEvent(raw, sig, secrets.stripe_webhook_secret);
+    evt = stripe.webhooks.constructEvent(raw, sig, webhookSecret);
   } catch (e) {
     return { statusCode: 400, body: `Webhook signature error: ${e.message}` };
   }

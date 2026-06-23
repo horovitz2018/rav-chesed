@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Icons } from './Icons.jsx';
 import { DatePicker } from './DatePicker.jsx';
 import { useData } from './useData.js';
-import { startDonationCheckout, runStripeImport, saveStripeKeys } from './stripe.js';
+import { startDonationCheckout, runStripeImport } from './stripe.js';
 import { supabase } from './supabaseClient.js';
 import { Login } from './Login.jsx';
 import { ORG, SUPPORT_CATEGORIES, EXPENSE_CATEGORIES, PRIORITY_LEVELS } from './config.js';
@@ -45,7 +45,7 @@ function MainApp() {
 
   // מאגרי נתונים — מחוברים ל-Supabase (בסיס נתונים אמיתי)
   const data = useData();
-  const { loading, error, fundraisers, donors, campaigns, recipients, requests, expenses, donations, pledges, settings } = data;
+  const { loading, error, fundraisers, donors, campaigns, recipients, requests, expenses, donations, pledges } = data;
 
   // מצב הזנת תרומה קבוצתית
   const [donationMode, setDonationMode] = useState('single'); // 'single' | 'multi'
@@ -290,7 +290,6 @@ function MainApp() {
 
   const handleImportStripe = async () => {
     if (importing) return;
-    if (!settings.stripeEnabled) { showToast('יש לחבר את Stripe בהגדרות לפני יבוא.', 'error'); return; }
     if (!window.confirm('לייבא את כל הנתונים מ-Stripe מתחילת השנה? (בטוח להרצה חוזרת — לא ייווצרו כפילויות)')) return;
     setImporting(true);
     setImportProgress('מתחיל יבוא...');
@@ -316,9 +315,6 @@ function MainApp() {
     if (!window.confirm('למחוק/לנתק את ההתחייבות הזו? התרומות שכבר נרשמו יישארו. (לא מבטל את המנוי ב-Stripe)')) return;
     run(() => data.deletePledge(pledge.id), () => showToast('ההתחייבות נותקה מהמערכת.'));
   };
-
-  const handleSaveStripeSettings = (patch) =>
-    run(async () => { await saveStripeKeys(patch); await data.reload(); }, () => showToast('מפתחות ה-Stripe נשמרו מאובטח. ✓'));
 
   const handleOnlineDonation = (payload) =>
     run(() => startDonationCheckout(payload)); // מפנה ל-Stripe; אם נכשל — מציג שגיאה
@@ -1620,39 +1616,19 @@ function MainApp() {
 
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6 animate-fadeIn">
                 <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="font-extrabold text-slate-900 text-base">חיבור לשער הסליקה Stripe</h3>
-                    <span className={`px-3 py-1 text-xs font-bold rounded-full ${settings.stripeEnabled ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
-                      {settings.stripeEnabled ? '✓ מחובר' : 'טרם חובר'}
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500 mb-4">
-                    הזן את מפתחות ה-Stripe של הארגון. המפתחות נשמרים מאובטח ומשמשים לקבלת תרומות אונליין.
-                    מצא אותם ב-Stripe: <span className="font-mono">Developers → API keys</span> ו-<span className="font-mono">Webhooks</span>.
-                  </p>
-                  <form onSubmit={(e) => {
-                    e.preventDefault();
-                    const fd = new FormData(e.target);
-                    const patch = {};
-                    const sk = fd.get('stripeSecretKey').trim();
-                    const wh = fd.get('stripeWebhookSecret').trim();
-                    if (sk) patch.stripeSecretKey = sk;
-                    if (wh) patch.stripeWebhookSecret = wh;
-                    if (!sk && !wh) { showToast('לא הוזנו מפתחות חדשים', 'error'); return; }
-                    handleSaveStripeSettings(patch);
-                    e.target.reset();
-                  }} className="space-y-3 text-sm bg-slate-50 p-4 rounded-xl border border-slate-100">
-                    <div>
-                      <label className="block text-xs font-bold text-slate-500 mb-1">Secret Key (sk_...)</label>
-                      <input name="stripeSecretKey" type="password" dir="ltr" placeholder={settings.stripeEnabled ? '•••••••• (שמור — הזן רק כדי להחליף)' : 'sk_live_... או sk_test_...'} className="w-full border border-slate-200 rounded-lg p-2 font-mono" />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-bold text-slate-500 mb-1">Webhook Signing Secret (whsec_...)</label>
-                      <input name="stripeWebhookSecret" type="password" dir="ltr" placeholder={settings.stripeEnabled ? '•••••••• (שמור — הזן רק כדי להחליף)' : 'whsec_...'} className="w-full border border-slate-200 rounded-lg p-2 font-mono" />
+                  <h3 className="font-extrabold text-slate-900 text-base mb-3">חיבור לשער הסליקה Stripe</h3>
+                  <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl space-y-3 text-sm">
+                    <p className="text-slate-600">🔒 מטעמי אבטחה, מפתחות ה-Stripe מוגדרים כ<strong>משתני סביבה מאובטחים</strong> ואינם נשמרים במערכת או בדאטהבייס. רק פונקציות השרת ניגשות אליהם.</p>
+                    <div className="space-y-1.5 text-xs">
+                      <p className="font-bold text-slate-500">משתנים להגדרה ב-Netlify (Site configuration → Environment variables):</p>
+                      <ul className="font-mono text-slate-700 space-y-0.5 list-disc pr-5" dir="ltr">
+                        <li>STRIPE_SECRET_KEY</li>
+                        <li>STRIPE_WEBHOOK_SECRET</li>
+                        <li>SITE_URL</li>
+                      </ul>
                     </div>
                     <p className="text-[11px] text-slate-400">💡 כתובת ה-Webhook להגדרה ב-Stripe: <span className="font-mono" dir="ltr">{window.location.origin}/.netlify/functions/stripe-webhook</span></p>
-                    <button type="submit" className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-sm transition">שמור מפתחות Stripe</button>
-                  </form>
+                  </div>
                 </div>
 
                 <hr className="border-slate-100" />
@@ -1662,13 +1638,12 @@ function MainApp() {
                   <p className="text-xs text-slate-500 mb-3">שליפת מנויים חוזרים ותשלומים מתחילת השנה אל המערכת. בטוח להרצה חוזרת — לא ייווצרו כפילויות (זיהוי לפי מזהי Stripe).</p>
                   <button
                     onClick={handleImportStripe}
-                    disabled={importing || !settings.stripeEnabled}
+                    disabled={importing}
                     className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-sm transition disabled:bg-slate-300 flex items-center gap-2"
                   >
                     {importing && <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span>}
                     {importing ? (importProgress || 'מייבא...') : '⤓ ייבא מ-Stripe (מתחילת השנה)'}
                   </button>
-                  {!settings.stripeEnabled && <p className="text-xs text-amber-600 mt-2">יש לחבר Stripe למעלה לפני היבוא.</p>}
                 </div>
 
                 <hr className="border-slate-100" />

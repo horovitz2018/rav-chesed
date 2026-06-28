@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { fetchTable, insertRow, insertRows, updateRow, deleteRow, deleteAllRows, TABLES } from './db.js';
+import { normalizePhone, parseEuroAmount, normalizePledgeMethod } from './csv.js';
 
 // Hook מרכזי: טוען את כל הנתונים מ-Supabase ומספק פעולות כתיבה.
 // כל פעולה כותבת ל-DB ואז מעדכנת את ה-state המקומי כדי שהממשק יגיב מיד.
@@ -259,6 +260,99 @@ export function useData() {
     setCampaigns((prev) => prev.filter((c) => c.id !== id));
   };
 
+  // ─── יבוא המוני של תורמים מ-CSV (+ יצירת התחייבויות) ───
+  const bulkImportDonors = async (rows, mapping, options = {}, onProgress) => {
+    const get = (row, key) => {
+      const idx = mapping[key];
+      return idx != null && idx !== '' ? (row[idx] ?? '').toString().trim() : '';
+    };
+
+    // מבני דה-דופ מהמצב הקיים (+ נצבר תוך כדי הריצה)
+    const phoneSet = new Set(donors.map((d) => normalizePhone(d.phone)).filter(Boolean));
+    const nameSet = new Set(
+      donors.map((d) => `${(d.firstName || '').trim()}|${(d.lastName || '').trim()}`.toLowerCase()).filter((k) => k !== '|')
+    );
+    const fundByName = {};
+    fundraisers.forEach((f) => { if (f.name) fundByName[f.name.trim()] = f.id; });
+    const pledgeKeys = new Set(
+      pledges.filter((p) => p.status === 'active').map((p) => `${p.donorId}|${p.amount}|${p.method}|${p.campaignId || ''}`)
+    );
+
+    let donorsCreated = 0, pledgesCreated = 0, fundraisersCreated = 0, skippedDonors = 0, skippedPledges = 0;
+    const warnings = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const firstName = get(row, 'firstName');
+      const lastName = get(row, 'lastName');
+      const phone = normalizePhone(get(row, 'phone'));
+      const nameKey = `${firstName}|${lastName}`.toLowerCase();
+
+      // 1. דה-דופ — מדלגים על כל השורה
+      const dup = (phone && phoneSet.has(phone)) || (!phone && nameKey !== '|' && nameSet.has(nameKey));
+      if (dup) { skippedDonors++; if (i % 15 === 0) onProgress?.(`מעבד... (${donorsCreated})`); continue; }
+
+      // 2. שדות
+      const titleBefore = get(row, 'titleBefore');
+      const titleAfter = get(row, 'titleAfter');
+      const connection = get(row, 'connection');
+      const address = get(row, 'address');
+      const groupName = get(row, 'groupName');
+      const subgroupName = get(row, 'subgroupName');
+      const name = [titleBefore, firstName, lastName, titleAfter].filter(Boolean).join(' ') || firstName || lastName || 'תורם';
+
+      // 3. גובה → מתרים
+      const gabai = get(row, 'collector');
+      let assignedFundraiserId = null;
+      if (gabai) {
+        if (fundByName[gabai]) assignedFundraiserId = fundByName[gabai];
+        else {
+          const f = await insertRow('fundraisers', { name: gabai, target: 0 });
+          fundByName[gabai] = f.id; assignedFundraiserId = f.id; fundraisersCreated++;
+        }
+      }
+
+      // 4. יצירת תורם
+      const created = await insertRow('donors', {
+        name,
+        titleBefore: titleBefore || null,
+        firstName: firstName || null,
+        lastName: lastName || null,
+        titleAfter: titleAfter || null,
+        connection: connection || null,
+        address: address || null,
+        phone: phone || null,
+        groupName: groupName || null,
+        subgroupName: subgroupName || null,
+        assignedFundraiserId,
+        totalDonated: 0,
+      });
+      donorsCreated++;
+      if (phone) phoneSet.add(phone); else if (nameKey !== '|') nameSet.add(nameKey);
+
+      // 5. התחייבות
+      if (options.createPledges) {
+        const amount = parseEuroAmount(get(row, 'amount'));
+        if (amount > 0) {
+          const methodRaw = get(row, 'method');
+          const { method, matched } = normalizePledgeMethod(methodRaw);
+          if (!matched) warnings.push(`שורה ${i + 1}: אופן גבייה לא מזוהה ("${methodRaw}") — נקבע בנק.`);
+          if (method === 'cash' && !gabai) warnings.push(`שורה ${i + 1}: גבייה במזומן ללא גבאי (${name}).`);
+          const campaignId = options.campaignId || null;
+          const key = `${created.id}|${amount}|${method}|${campaignId || ''}`;
+          if (pledgeKeys.has(key)) { skippedPledges++; }
+          else {
+            await insertRow('pledges', { donorId: created.id, amount, method, status: 'active', billingDay: 1, campaignId });
+            pledgeKeys.add(key); pledgesCreated++;
+          }
+        }
+      }
+      if (i % 10 === 0) onProgress?.(`מייבא... (${donorsCreated} תורמים)`);
+    }
+
+    return { donorsCreated, pledgesCreated, fundraisersCreated, skippedDonors, skippedPledges, warnings };
+  };
+
   // מחיקת/ניתוק תרומה — מסיר את הרשומה ומעדכן בחזרה את התורם והמגבית
   const deleteDonation = async (donation) => {
     await deleteRow('donations', donation.id);
@@ -303,6 +397,7 @@ export function useData() {
     saveDistribution, markAsPaid,
     addPledge, setPledgeStatus, payPledge, saveSettings,
     addCampaign, updateCampaign, deleteCampaign,
+    bulkImportDonors,
     deleteDonation, deletePledge,
     clearAll,
   };

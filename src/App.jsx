@@ -3,6 +3,7 @@ import { Icons } from './Icons.jsx';
 import { DatePicker } from './DatePicker.jsx';
 import { useData } from './useData.js';
 import { startDonationCheckout, runStripeImport } from './stripe.js';
+import { parseCSV, pickColumn } from './csv.js';
 import { supabase } from './supabaseClient.js';
 import { Login } from './Login.jsx';
 import { ORG, SUPPORT_CATEGORIES, EXPENSE_CATEGORIES, PRIORITY_LEVELS } from './config.js';
@@ -78,6 +79,8 @@ function MainApp() {
   const [savingDonorId, setSavingDonorId] = useState(null);            // מניעת שליחה כפולה
   const [campaignSearch, setCampaignSearch] = useState('');
   const [campaignFilter, setCampaignFilter] = useState('all');         // all | donated | not
+  const [showDonorImport, setShowDonorImport] = useState(false);       // מודל יבוא תורמים מ-CSV
+  const [donorCard, setDonorCard] = useState(null);                    // כרטיס תורם פתוח
 
   // חיפוש ובחירת תורם בהזנת תרומה
   const [selectedDonorId, setSelectedDonorId] = useState('');
@@ -327,9 +330,22 @@ function MainApp() {
     run(() => data.deletePledge(pledge.id), () => showToast('ההתחייבות נותקה מהמערכת.'));
   };
 
-  // ─── מגביות ───
+  // ─── תורמים ───
   const handleUpdateDonor = (id, patch) =>
     run(() => data.updateDonor(id, patch));
+
+  const handleSaveDonorCard = (id, patch) =>
+    run(() => data.updateDonor(id, patch), () => { showToast('פרטי התורם עודכנו.'); setDonorCard(null); });
+
+  // יבוא תורמים מ-CSV → כותב ל-DB ומרענן
+  const handleBulkImportDonors = async (rows, mapping, options, onProgress) => {
+    const res = await data.bulkImportDonors(rows, mapping, options, onProgress);
+    await data.reload();
+    showToast(`יבוא הושלם: ${res.donorsCreated} תורמים, ${res.pledgesCreated} התחייבויות${res.skippedDonors ? `, דולגו ${res.skippedDonors}` : ''}.`);
+    return res;
+  };
+
+  // ─── מגביות ───
 
   const handleSaveCampaign = (campData) => {
     if (editingCampaign) {
@@ -914,9 +930,14 @@ function MainApp() {
                   <h2 className="text-2xl font-black text-slate-900">ניהול פנקס תורמים</h2>
                   <p className="text-slate-500">תצוגת תורמים, שיוך מתרימים והיסטוריית תרומות</p>
                 </div>
-                <button onClick={() => setShowAddDonorModal(true)} className="flex items-center px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold transition shadow-sm">
-                  <Icons.Plus /> תורם חדש
-                </button>
+                <div className="flex space-x-3 space-x-reverse">
+                  <button onClick={() => setShowDonorImport(true)} className="flex items-center px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl font-semibold transition shadow-sm">
+                    📥 יבוא מקובץ (CSV)
+                  </button>
+                  <button onClick={() => setShowAddDonorModal(true)} className="flex items-center px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold transition shadow-sm">
+                    <Icons.Plus /> תורם חדש
+                  </button>
+                </div>
               </div>
 
               {currentRole === 'Fundraiser' && (
@@ -953,7 +974,12 @@ function MainApp() {
                     <tbody className="divide-y divide-slate-100 text-sm">
                       {visibleDonors.map(donor => (
                         <tr key={donor.id} className="hover:bg-slate-50/50 transition">
-                          <td className="p-4 font-bold text-slate-950">{donor.name}</td>
+                          <td className="p-4">
+                            <button onClick={() => setDonorCard(donor)} className="text-right hover:text-indigo-700 transition">
+                              <p className="font-bold text-slate-950">{[donor.firstName, donor.lastName].filter(Boolean).join(' ') || donor.name}</p>
+                              {donor.connection && <p className="text-[11px] text-slate-400">{donor.connection}</p>}
+                            </button>
+                          </td>
                           <td className="p-4">
                             <div className="text-slate-800 font-medium">{donor.email}</div>
                             <div className="text-xs text-slate-400">{donor.phone}</div>
@@ -1901,6 +1927,16 @@ function MainApp() {
         </Modal>
       )}
 
+      {/* Donor CSV import */}
+      {showDonorImport && (
+        <DonorImportModal campaigns={campaigns} onImport={handleBulkImportDonors} onClose={() => setShowDonorImport(false)} />
+      )}
+
+      {/* Donor card */}
+      {donorCard && (
+        <DonorCard donor={donorCard} pledges={pledges} donations={donations} fundraisers={fundraisers} onSave={handleSaveDonorCard} onClose={() => setDonorCard(null)} />
+      )}
+
       {/* Add/Edit Campaign */}
       {showCampaignModal && (
         <CampaignModal
@@ -2317,6 +2353,249 @@ function CampaignModal({ campaign, onSave, onClose }) {
         <ModalButtons onCancel={onClose} submitLabel={campaign ? 'שמור שינויים' : 'צור מגבית'} submitClass="bg-indigo-600 hover:bg-indigo-700" />
       </form>
     </Modal>
+  );
+}
+
+// ─── מודל יבוא תורמים מ-CSV ───
+function DonorImportModal({ campaigns, onImport, onClose }) {
+  const FIELDS = [
+    { key: 'titleBefore', label: 'תואר לפני', cands: ['תואר לפני'] },
+    { key: 'lastName', label: 'שם משפחה', cands: ['שם משפחה'] },
+    { key: 'firstName', label: 'שם פרטי', cands: ['שם פרטי'] },
+    { key: 'titleAfter', label: 'תואר אחרי', cands: ['תואר אחרי'] },
+    { key: 'connection', label: 'חתן / קשר', cands: ['חתן', 'קשר'] },
+    { key: 'phone', label: 'טלפון נייד', cands: ['נייד', 'mobile'] },
+    { key: 'address', label: 'כתובת', cands: ['כתובת'] },
+    { key: 'groupName', label: 'קבוצה ראשית', cands: ['קבוצה ראשית', 'קבוצה'] },
+    { key: 'subgroupName', label: 'תת־קבוצה', cands: ['תת', 'בית כנסת'] },
+    { key: 'amount', label: 'סכום התחייבות', cands: ['סכום'] },
+    { key: 'method', label: 'אופן גבייה', cands: ['אופן גבייה', 'אופן גביה'] },
+    { key: 'collector', label: 'גובה / גבאי', cands: ['גובה', 'גבאי'] },
+  ];
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [mapping, setMapping] = useState({});
+  const [createPledges, setCreatePledges] = useState(true);
+  const [campaignId, setCampaignId] = useState('');
+  const [fileName, setFileName] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState('');
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+
+  const onFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(''); setResult(null); setFileName(file.name);
+    try {
+      const parsed = parseCSV(await file.text());
+      if (!parsed.headers.length) { setError('הקובץ ריק או לא תקין.'); return; }
+      setHeaders(parsed.headers);
+      setRows(parsed.rows);
+      const m = {};
+      FIELDS.forEach(f => { const idx = pickColumn(parsed.headers, f.cands); if (idx >= 0) m[f.key] = idx; });
+      setMapping(m);
+    } catch (err) { setError('שגיאה בקריאת הקובץ: ' + err.message); }
+  };
+
+  const get = (row, key) => { const idx = mapping[key]; return idx != null && idx !== '' ? (row[idx] ?? '') : ''; };
+  const preview = rows.slice(0, 5);
+
+  const runImport = async () => {
+    setImporting(true); setError(''); setResult(null);
+    try {
+      const res = await onImport(rows, mapping, { createPledges, campaignId: campaignId || null }, setProgress);
+      setResult(res);
+    } catch (err) { setError(err.message || 'שגיאה ביבוא'); }
+    finally { setImporting(false); setProgress(''); }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl max-w-3xl w-full p-6 shadow-2xl border border-slate-100 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+          <h3 className="text-xl font-extrabold text-slate-900">יבוא תורמים מקובץ CSV</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
+        </div>
+
+        <div className="bg-indigo-50 border border-indigo-100 p-3 rounded-xl text-xs text-indigo-800">
+          💡 שמור את הקובץ ב-Excel כ-<strong>CSV UTF-8</strong> (כדי שעברית לא תישבר). התוחם (פסיק / נקודה-פסיק) מזוהה אוטומטית.
+        </div>
+
+        <input type="file" accept=".csv,text/csv" onChange={onFile} className="block w-full text-sm" />
+        {fileName && <p className="text-xs text-slate-500">קובץ: {fileName} · {rows.length} שורות</p>}
+        {error && <div className="bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-xl p-3">{error}</div>}
+
+        {headers.length > 0 && !result && (
+          <>
+            <div>
+              <h4 className="font-bold text-slate-700 text-sm mb-2">מיפוי עמודות</h4>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                {FIELDS.map(f => (
+                  <div key={f.key}>
+                    <label className="block text-[11px] font-bold text-slate-500 mb-0.5">{f.label}</label>
+                    <select value={mapping[f.key] ?? ''} onChange={e => setMapping(prev => ({ ...prev, [f.key]: e.target.value === '' ? undefined : Number(e.target.value) }))} className="w-full text-xs border border-slate-200 rounded p-1.5">
+                      <option value="">— ללא —</option>
+                      {headers.map((h, idx) => <option key={idx} value={idx}>{idx + 1}. {h || '(ריק)'}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-4 bg-slate-50 p-3 rounded-xl">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                <input type="checkbox" checked={createPledges} onChange={e => setCreatePledges(e.target.checked)} />
+                צור התחייבות (הו"ק) מהסכום
+              </label>
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-slate-500">מגבית:</span>
+                <select value={campaignId} onChange={e => setCampaignId(e.target.value)} className="border border-slate-200 rounded p-1.5 text-sm">
+                  <option value="">ללא</option>
+                  {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <h4 className="font-bold text-slate-700 text-sm mb-2">תצוגה מקדימה (5 ראשונות)</h4>
+              <div className="overflow-x-auto border border-slate-100 rounded-xl">
+                <table className="w-full text-right text-xs">
+                  <thead className="bg-slate-50 text-slate-400">
+                    <tr><th className="p-2">שם</th><th className="p-2">נייד</th><th className="p-2">קבוצה</th><th className="p-2">סכום</th><th className="p-2">אופן</th><th className="p-2">גובה</th></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {preview.map((row, i) => {
+                      const cash = /מזומן|cash|contant/i.test(get(row, 'method'));
+                      const noGabai = cash && !get(row, 'collector');
+                      return (
+                        <tr key={i}>
+                          <td className="p-2 font-bold">{[get(row, 'titleBefore'), get(row, 'firstName'), get(row, 'lastName'), get(row, 'titleAfter')].filter(Boolean).join(' ')}</td>
+                          <td className="p-2" dir="ltr">{get(row, 'phone')}</td>
+                          <td className="p-2">{[get(row, 'groupName'), get(row, 'subgroupName')].filter(Boolean).join(' / ')}</td>
+                          <td className="p-2">{get(row, 'amount')}</td>
+                          <td className="p-2">{get(row, 'method')}</td>
+                          <td className="p-2">{get(row, 'collector') || (noGabai ? <span className="text-amber-600 font-bold">⚠ חסר</span> : '')}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={onClose} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg">ביטול</button>
+              <button onClick={runImport} disabled={importing} className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-sm transition disabled:bg-slate-300 flex items-center gap-2">
+                {importing && <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span>}
+                {importing ? (progress || 'מייבא...') : `ייבא ${rows.length} שורות`}
+              </button>
+            </div>
+          </>
+        )}
+
+        {result && (
+          <div className="space-y-3">
+            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-sm">
+              <p className="font-bold text-emerald-800 mb-1">✓ היבוא הושלם</p>
+              <ul className="text-emerald-700 text-xs space-y-0.5">
+                <li>תורמים שנוספו: {result.donorsCreated}</li>
+                <li>התחייבויות שנוצרו: {result.pledgesCreated}</li>
+                <li>מתרימים (גובים) שנוצרו: {result.fundraisersCreated}</li>
+                <li>תורמים שדולגו (כפילות): {result.skippedDonors}</li>
+                <li>התחייבויות שדולגו (כפילות): {result.skippedPledges}</li>
+              </ul>
+            </div>
+            {result.warnings?.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800 max-h-40 overflow-y-auto">
+                <p className="font-bold mb-1">אזהרות ({result.warnings.length}):</p>
+                <ul className="space-y-0.5">{result.warnings.slice(0, 50).map((w, i) => <li key={i}>• {w}</li>)}</ul>
+              </div>
+            )}
+            <div className="flex justify-end"><button onClick={onClose} className="px-4 py-2 bg-slate-900 text-white font-bold rounded-lg">סגור</button></div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── כרטיס תורם בסיסי (פרטים שיובאו; תרומות/התחייבויות לקריאה בלבד) ───
+function DonorCard({ donor, pledges, donations, fundraisers, onSave, onClose }) {
+  const [f, setF] = useState({
+    titleBefore: donor.titleBefore || '', firstName: donor.firstName || '', lastName: donor.lastName || '',
+    titleAfter: donor.titleAfter || '', connection: donor.connection || '', phone: donor.phone || '',
+    address: donor.address || '', groupName: donor.groupName || '', subgroupName: donor.subgroupName || '',
+    assignedFundraiserId: donor.assignedFundraiserId || '',
+  });
+  const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+  const activePledge = pledges.find(p => p.donorId === donor.id && p.status === 'active');
+  const donorDonations = donations.filter(d => d.donorId === donor.id).slice(0, 6);
+  const fullName = [f.titleBefore, f.firstName, f.lastName, f.titleAfter].filter(Boolean).join(' ');
+
+  const submit = (e) => {
+    e.preventDefault();
+    onSave(donor.id, {
+      ...f,
+      name: [f.titleBefore, f.firstName, f.lastName, f.titleAfter].filter(Boolean).join(' ') || f.firstName || f.lastName || 'תורם',
+      assignedFundraiserId: f.assignedFundraiserId || null,
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl border border-slate-100 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+          <div>
+            <h3 className="text-xl font-extrabold text-slate-900">{fullName || 'כרטיס תורם'}</h3>
+            <p className="text-xs text-slate-400">סה"כ נתרם: {C}{(donor.totalDonated || 0).toLocaleString()}</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
+        </div>
+
+        <form onSubmit={submit} className="space-y-3 text-sm">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="תואר לפני"><input value={f.titleBefore} onChange={e => set('titleBefore', e.target.value)} className="modal-input" /></Field>
+            <Field label="תואר אחרי"><input value={f.titleAfter} onChange={e => set('titleAfter', e.target.value)} className="modal-input" /></Field>
+            <Field label="שם פרטי"><input value={f.firstName} onChange={e => set('firstName', e.target.value)} className="modal-input" /></Field>
+            <Field label="שם משפחה"><input value={f.lastName} onChange={e => set('lastName', e.target.value)} className="modal-input" /></Field>
+          </div>
+          <Field label="חתן / קשר"><input value={f.connection} onChange={e => set('connection', e.target.value)} className="modal-input" /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="טלפון נייד"><input value={f.phone} onChange={e => set('phone', e.target.value)} className="modal-input" dir="ltr" /></Field>
+            <Field label="כתובת"><input value={f.address} onChange={e => set('address', e.target.value)} className="modal-input" /></Field>
+            <Field label="קבוצה ראשית"><input list="donor-groups" value={f.groupName} onChange={e => set('groupName', e.target.value)} className="modal-input" /></Field>
+            <Field label="תת־קבוצה"><input list="donor-subgroups" value={f.subgroupName} onChange={e => set('subgroupName', e.target.value)} className="modal-input" /></Field>
+          </div>
+          <Field label="גובה / מתרים משויך">
+            <select value={f.assignedFundraiserId} onChange={e => set('assignedFundraiserId', e.target.value)} className="modal-input">
+              <option value="">— ללא —</option>
+              {fundraisers.map(fr => <option key={fr.id} value={fr.id}>{fr.name}</option>)}
+            </select>
+          </Field>
+
+          {activePledge && (
+            <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3 text-xs">
+              <p className="font-bold text-indigo-800">התחייבות פעילה: {C}{activePledge.amount.toLocaleString()} / חודש · {methodLabel(activePledge.method)}</p>
+              <p className="text-indigo-500 mt-0.5">לקריאה בלבד — ניהול במסך ההתחייבויות</p>
+            </div>
+          )}
+          {donorDonations.length > 0 && (
+            <div className="border border-slate-100 rounded-xl p-3">
+              <p className="text-xs font-bold text-slate-500 mb-1">תרומות אחרונות (לקריאה)</p>
+              <div className="space-y-1 text-xs">
+                {donorDonations.map(d => <div key={d.id} className="flex justify-between"><span className="text-slate-500">{d.date}</span><span className="font-bold text-emerald-600">{C}{d.amount.toLocaleString()}</span></div>)}
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg">סגור</button>
+            <button type="submit" className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg">שמור שינויים</button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 

@@ -1,4 +1,5 @@
 import { getStripe, supabase } from './_settings.mjs';
+import { extractDonorboxMeta, getOrCreateDonorboxCampaign, resolveDonorboxDonor, resolveDonorboxPledge } from './_donorbox.mjs';
 
 const PAGE = 25;
 const yearStart = Math.floor(new Date(new Date().getFullYear(), 0, 1).getTime() / 1000);
@@ -114,17 +115,22 @@ export const handler = async (event) => {
       const existSet = new Set((existingD || []).map((d) => d.stripe_id));
 
       const toInsert = valid.filter((ch) => !existSet.has(ch.payment_intent || ch.id));
-      const donorMap = await resolveDonors(toInsert.map((ch) => ch.customer));
 
-      // קישור לפי מנוי → התחייבות
-      const subIds = [...new Set(toInsert.map((ch) => ch.invoice?.subscription).filter(Boolean))];
+      // הפרדה: חיובי Donorbox (לפי metadata) מטופלים בנפרד מחיובי Stripe רגילים
+      const donorboxCharges = toInsert.filter((ch) => extractDonorboxMeta(ch.metadata));
+      const plainCharges = toInsert.filter((ch) => !extractDonorboxMeta(ch.metadata));
+
+      const donorMap = await resolveDonors(plainCharges.map((ch) => ch.customer));
+
+      // קישור לפי מנוי → התחייבות (חיובי Stripe רגילים)
+      const subIds = [...new Set(plainCharges.map((ch) => ch.invoice?.subscription).filter(Boolean))];
       const pledgeBySub = {};
       if (subIds.length) {
         const { data: pl } = await supabase.from('pledges').select('id,stripe_subscription_id').in('stripe_subscription_id', subIds);
         (pl || []).forEach((p) => { pledgeBySub[p.stripe_subscription_id] = p.id; });
       }
 
-      const rows = toInsert.map((ch) => ({
+      const rows = plainCharges.map((ch) => ({
         donor_id: donorMap[ch.customer?.id || ch.customer] || null,
         amount: ch.amount / 100,
         campaign_id: campaignId,
@@ -136,8 +142,37 @@ export const handler = async (event) => {
       }));
       if (rows.length) await supabase.from('donations').insert(rows);
 
+      // חיובי Donorbox — זיהוי/יצירת תורם+הו"ק+מגבית קבועה (בנפרד, כל שורה בתורה)
+      let donorboxCreated = 0;
+      if (donorboxCharges.length) {
+        const donorboxCampaignId = await getOrCreateDonorboxCampaign();
+        for (const ch of donorboxCharges) {
+          const meta = extractDonorboxMeta(ch.metadata);
+          const customerId = ch.customer?.id || ch.customer || null;
+          const amount = ch.amount / 100;
+          const donorId = await resolveDonorboxDonor(customerId, meta);
+          const pledgeId = await resolveDonorboxPledge(donorId, meta, amount, donorboxCampaignId);
+          await supabase.from('donations').insert({
+            donor_id: donorId,
+            amount,
+            campaign_id: donorboxCampaignId,
+            source: 'Donorbox',
+            date: new Date(ch.created * 1000).toISOString().split('T')[0],
+            status: 'הושלם',
+            stripe_id: ch.payment_intent || ch.id,
+            stripe_payment_intent_id: ch.payment_intent || null,
+            stripe_customer_id: customerId,
+            donor_email: meta.email,
+            donor_name: meta.name,
+            paid_at: new Date(ch.created * 1000).toISOString(),
+            pledge_id: pledgeId,
+          });
+          donorboxCreated++;
+        }
+      }
+
       const last = charges.data[charges.data.length - 1];
-      return { statusCode: 200, body: JSON.stringify({ created: rows.length, hasMore: charges.has_more, nextCursor: last?.id || null }) };
+      return { statusCode: 200, body: JSON.stringify({ created: rows.length + donorboxCreated, hasMore: charges.has_more, nextCursor: last?.id || null }) };
     }
 
     // ─── שלב 3: חישוב מחדש של סכומים ───

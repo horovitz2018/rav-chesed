@@ -1175,6 +1175,8 @@ function MainApp() {
                               <span className="inline-flex items-center text-emerald-600"><span className="w-2 h-2 bg-emerald-500 rounded-full ml-1.5"></span> יבוא מהבנק</span>
                             ) : don.source === 'הו"ק' ? (
                               <span className="inline-flex items-center text-purple-600"><span className="w-2 h-2 bg-purple-500 rounded-full ml-1.5"></span> הוראת קבע</span>
+                            ) : don.source === 'Donorbox' ? (
+                              <span className="inline-flex items-center text-amber-600"><span className="w-2 h-2 bg-amber-500 rounded-full ml-1.5"></span> Donorbox</span>
                             ) : (
                               <span className="inline-flex items-center text-slate-600"><span className="w-2 h-2 bg-slate-400 rounded-full ml-1.5"></span> קבלה ידנית</span>
                             )}
@@ -2084,7 +2086,7 @@ function MainApp() {
         <Modal onClose={() => setHistoryPledge(null)} title={`היסטוריית תשלומים — ${donors.find(d => d.id === historyPledge.donorId)?.name || 'תורם'}`}>
           {(() => {
             const pays = donations.filter(d => d.pledgeId === historyPledge.id).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-            const srcLabel = (s) => s === 'Stripe' ? 'אשראי' : s === 'בנק' ? 'העברה בנקאית' : s === 'ידני' ? 'מזומן/ידני' : s;
+            const srcLabel = (s) => s === 'Stripe' ? 'אשראי' : s === 'בנק' ? 'העברה בנקאית' : s === 'ידני' ? 'מזומן/ידני' : s === 'Donorbox' ? 'Donorbox' : s;
             return (
               <div className="space-y-3">
                 <div className="flex justify-between text-xs bg-slate-50 rounded-lg p-3">
